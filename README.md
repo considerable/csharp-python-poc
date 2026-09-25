@@ -1,12 +1,11 @@
 # C# Azure Functions DevOps POC
 
-A small end-to-end DevOps / Platform Engineering proof of concept showing how I take a service from source code to a deployed Azure application using **.NET, Azure Functions, Terraform, Azure DevOps CI/CD, and automated validation**.
+A small end-to-end DevOps / Platform Engineering proof of concept showing the path from source code to a deployed Azure service using **.NET, Azure Functions, Terraform, Azure DevOps CI/CD, and automated validation**.
 
-The project also contains a small standalone C HTTP implementation of the same API behavior as a reference point for the transition from a traditional service to a managed serverless runtime.
+The repository also contains a small standalone C HTTP server implementing the same API behavior. It provides a simple reference point for moving from an application-managed HTTP service to a managed serverless runtime.
 
 ## What this demonstrates
 
-* C to C# / .NET service transition
 * .NET 10 isolated Azure Functions
 * Azure Functions Flex Consumption on Linux
 * Infrastructure as Code with Terraform
@@ -17,49 +16,24 @@ The project also contains a small standalone C HTTP implementation of the same A
 * Separation of infrastructure provisioning from application deployment
 * A simple HTTP API with automated post-deployment validation
 
-The goal is not to build a large application. The goal is to demonstrate the **engineering and delivery path around an application**.
+The application itself is intentionally small. The focus is the **engineering and delivery path around the application**.
 
 ---
 
 ## Architecture
 
-The environment is provisioned first with Terraform. Terraform creates the Azure resources and grants the Azure DevOps service principal the access to the resource group. The Azure DevOps pipeline then builds and deploys the application into that environment.
+Terraform provisions the Azure environment and configures the permissions used by Azure DevOps. The pipeline then builds, packages, deploys, and validates the application.
 
 ```mermaid
-flowchart TB
-    DEV["Developer"]
+flowchart TD
+    TF["Terraform"] --> ENV["Azure environment"]
+    TF --> RBAC["Contributor RBAC"]
 
-    TF["Terraform"]
-    RG["Azure Resource Group"]
+    SRC["Source code"] --> PIPE["Azure DevOps pipeline"]
+    RBAC --> PIPE
 
-    RBAC["Azure DevOps Service Principal<br/>Contributor on Resource Group"]
-
-    STORAGE["Azure Storage"]
-    PLAN["Linux Flex Consumption"]
-    FUNC[".NET 10 Azure Function"]
-    AI["Application Insights"]
-
-    PIPE["Azure DevOps Pipeline"]
-    APP["GET /api/hello"]
-
-    DEV -->|source changes| PIPE
-
-    TF -->|provisions| RG
-    TF -->|grants Contributor| RBAC
-
-    RG --> STORAGE
-    RG --> PLAN
-    RG --> FUNC
-    RG --> AI
-
-    STORAGE --> FUNC
-    PLAN --> FUNC
-
-    RBAC -->|authorizes deployment| PIPE
-
-    PIPE -->|build + package + deploy| FUNC
-    FUNC --> APP
-    FUNC --> AI
+    PIPE --> FUNC["Azure Function"]
+    FUNC --> AI["Application Insights"]
 ```
 
 ### Provisioning and deployment flow
@@ -79,7 +53,7 @@ flowchart TB
     H --> I["9. HTTP smoke test"]
 ```
 
-The important separation is:
+The separation is intentional:
 
 ```text
 Terraform
@@ -87,7 +61,7 @@ Terraform
     ├── creates Azure infrastructure
     │
     └── grants Azure DevOps service principal
-        Contributor access to the resource group
+        access to the resource group
 
 Azure DevOps
     │
@@ -97,9 +71,21 @@ Azure DevOps
     └── validates the deployed endpoint
 ```
 
-Terraform therefore establishes the environment **before application deployment**, while Azure DevOps uses the permissions Terraform configured to deploy the application.
+Infrastructure is therefore established before application deployment, while application releases remain under the CI/CD pipeline.
 
-### Application flow
+---
+
+## Application
+
+The service exposes one HTTP endpoint:
+
+```text
+GET /api/hello
+```
+
+The Azure Function uses the .NET isolated worker model. Azure Functions owns the HTTP listener and runtime lifecycle; the function code focuses on the API behavior.
+
+Request flow:
 
 ```mermaid
 sequenceDiagram
@@ -113,7 +99,7 @@ sequenceDiagram
     H->>C: HTTP 200
 ```
 
-Response:
+Expected response:
 
 ```json
 {
@@ -122,11 +108,23 @@ Response:
 }
 ```
 
+The deployed service can be tested directly:
+
+```bash
+% curl -fsS https://helloapifunc-demo.azurewebsites.net/api/hello | jq
+{
+  "message": "Hello from Azure Functions!",
+  "service": "hello-api"
+}
+```
+
+The same endpoint is called automatically by the Azure DevOps pipeline after deployment.
+
 ---
 
 ## Infrastructure
 
-Terraform provisions the Azure environment rather than relying on manually created resources.
+Terraform defines the Azure environment rather than relying on manually created portal resources.
 
 ```mermaid
 flowchart TB
@@ -135,7 +133,7 @@ flowchart TB
     TF --> RG["Resource Group"]
     TF --> SA["Storage Account"]
     TF --> SC["Blob Container"]
-    TF --> PLAN["Linux Flex Consumption Plan"]
+    TF --> PLAN["Linux Flex Consumption"]
     TF --> FUNC["Azure Function App"]
     TF --> AI["Application Insights"]
     TF --> RBAC["Contributor Role Assignment"]
@@ -151,69 +149,58 @@ flowchart TB
     RBAC --> RG
 ```
 
-The main Azure components are:
+The environment includes:
 
-* Resource Group
-* Storage Account and blob container
+* Azure Resource Group
+* Azure Storage Account and blob container
 * Linux Flex Consumption service plan
 * .NET 10 isolated Azure Function
 * System-assigned managed identity
 * Application Insights
 * Azure RBAC assignment for the Azure DevOps service principal
 
-Terraform keeps the infrastructure definition version-controlled and repeatable.
+The infrastructure definition is version-controlled and can be recreated from source.
 
 ---
 
 ## CI/CD
 
-The Azure DevOps pipeline follows a simple build → package → deploy → validate flow.
+The Azure DevOps pipeline implements a simple build → package → deploy → validate process.
 
 ```mermaid
-flowchart LR
-    A["Push to main"] --> B["Install .NET 10 SDK"]
-    B --> C["dotnet restore"]
-    C --> D["dotnet build"]
-    D --> E["dotnet publish"]
-    E --> F["Create ZIP"]
-    F --> G["Publish Pipeline Artifact"]
-    G --> H["Deploy to Azure Functions"]
-    H --> I["GET /api/hello"]
-    I --> J{"HTTP 200 + expected JSON?"}
-    J -->|Yes| K["Pipeline succeeds"]
-    J -->|No| L["Pipeline fails"]
+flowchart TD
+    A["Push to main"]
+    --> B["Build"]
+    --> C["Package"]
+    --> D["Deploy to Azure"]
+    --> E["HTTP smoke test"]
+
+    E --> F{"Valid response?"}
+    F -->|Yes| G["Pipeline succeeds"]
+    F -->|No| H["Pipeline fails"]
 ```
 
-The pipeline intentionally validates the deployed application rather than stopping after a successful deployment command.
+The pipeline:
 
-The smoke test checks the deployed endpoint and verifies the expected service response.
+1. Installs the .NET 10 SDK
+2. Restores NuGet dependencies
+3. Builds the Function application
+4. Publishes the application
+5. Creates a deployment ZIP
+6. Publishes the ZIP as a pipeline artifact
+7. Deploys it to Azure Functions
+8. Calls the deployed HTTP endpoint
+9. Verifies the expected service response
 
----
-
-## Application
-
-The application is deliberately small:
-
-```text
-GET /api/hello
-```
-
-Expected response:
-
-```json
-{
-  "message": "Hello from Azure Functions!",
-  "service": "hello-api"
-}
-```
-
-The Azure Function uses the .NET isolated worker model. Azure Functions owns the HTTP listener and runtime lifecycle; the function code focuses on application behavior.
+Deployment success alone is not considered sufficient. The pipeline validates the running application.
 
 ---
 
 ## C prototype
 
 `src/HelloApiPrototype/hello-api.c` contains a standalone POSIX C HTTP server implementing the same basic API behavior.
+
+It is included as a reference implementation rather than as another deployment target.
 
 ```mermaid
 flowchart LR
@@ -224,7 +211,7 @@ flowchart LR
     F --> E2["GET /api/hello"]
 ```
 
-The two implementations are intentionally different at the runtime level:
+The runtime models are intentionally different:
 
 | C prototype               | C# Azure Function                  |
 | ------------------------- | ---------------------------------- |
@@ -262,7 +249,7 @@ The C implementation is therefore a **behavioral reference**, not a feature-for-
     └── main.tf
 ```
 
-Local configuration files containing environment-specific settings are intentionally excluded from source control.
+Environment-specific configuration files are intentionally excluded from the public repository.
 
 ---
 
@@ -295,10 +282,10 @@ Local configuration files containing environment-specific settings are intention
 
 ### Development
 
-* Linux-compatible tooling
 * VS Code
 * Bash
 * POSIX sockets
+* Linux-compatible tooling
 
 ---
 
@@ -306,31 +293,31 @@ Local configuration files containing environment-specific settings are intention
 
 ### Infrastructure as Code
 
-Azure resources are defined in Terraform so that the environment can be recreated from source rather than manually configured through the Azure portal.
+Azure resources are defined in Terraform so the environment is reproducible from source instead of being dependent on manual portal configuration.
 
 ### Separate infrastructure and application deployment
 
-Terraform creates and configures the Azure environment.
+Terraform establishes the Azure environment and deployment permissions.
 
-The Azure DevOps pipeline builds and deploys the application.
+Azure DevOps builds and releases the application.
 
-This keeps infrastructure changes and application releases separate.
+This keeps infrastructure changes separate from application releases.
 
 ### Managed runtime
 
-The C prototype demonstrates the traditional model where the application owns the HTTP server.
+The C prototype represents the traditional model where the application owns the HTTP server and process lifecycle.
 
-The production implementation moves that responsibility to Azure Functions, allowing the application code to focus on the API behavior.
+The C# implementation delegates those responsibilities to Azure Functions, allowing the application code to focus on the API itself.
 
 ### Deployment validation
 
-A successful deployment command is not treated as proof that the application works.
+A successful deployment command does not prove that the deployed application is working.
 
-The pipeline performs an HTTP request against the deployed endpoint and verifies the expected response.
+The pipeline makes an HTTP request against the deployed service and verifies the expected response.
 
 ---
 
-## Security considerations
+## Security
 
 Environment-specific configuration and credentials are not committed to the public repository.
 
@@ -343,7 +330,7 @@ Examples include:
 * API keys
 * Private keys
 
-Azure DevOps authenticates to Azure through a service connection and RBAC rather than embedding Azure credentials in the repository.
+Azure DevOps authenticates to Azure through a service connection and Azure RBAC rather than embedding Azure credentials in the repository.
 
 ---
 
@@ -370,12 +357,20 @@ The C prototype can be built separately with a standard C compiler.
 
 ## Status
 
-The POC demonstrates the complete path:
+The POC is a working end-to-end delivery path:
 
-```mermaid
-flowchart LR
-    Source["Source code"]
-    --> IaC["Terraform"]
-    --> Azure["Azure infrastructure"]
-    --> Build["CI build"]
+```text
+Source code
+    ↓
+Terraform
+    ↓
+Azure infrastructure
+    ↓
+Azure DevOps CI/CD
+    ↓
+Azure Function deployment
+    ↓
+HTTP smoke test
 ```
+
+The result is a small but complete example of provisioning, building, deploying, and validating a cloud service through a repeatable DevOps workflow.
