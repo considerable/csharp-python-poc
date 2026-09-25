@@ -1,0 +1,66 @@
+trigger:
+  - main
+
+pr:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  buildConfiguration: Release
+  ResourceGroupName: 'rg-csharp-python-poc'
+  AzureSubscription: 'Azure subscription 1'
+  FunctionAppName: 'helloapifunc-demo'
+
+steps:
+  - task: UseDotNet@2
+    displayName: Install .NET 10 SDK
+    inputs:
+      packageType: 'sdk'
+      version: '10.0.x'
+
+  - script: |
+      set -euxo pipefail
+      cd "$(Build.SourcesDirectory)/src/HelloApiFunction"
+
+      dotnet restore
+      dotnet build --configuration $(buildConfiguration) --no-restore
+      dotnet publish --configuration $(buildConfiguration) --no-build --output ./publish
+
+      cd publish
+      zip -r "$(Build.ArtifactStagingDirectory)/hello-api.zip" .
+    displayName: Build and package Azure Function app
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish function zip artifact
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)/hello-api.zip'
+      artifact: 'functionapp'
+
+  - task: AzureFunctionApp@2
+    displayName: Deploy Azure Function App
+    inputs:
+      azureSubscription: '$(AzureSubscription)'
+      appType: functionAppLinux
+      isFlexConsumption: true
+      appName: '$(FunctionAppName)'
+      package: '$(Build.ArtifactStagingDirectory)/hello-api.zip'
+      deploymentMethod: auto
+
+  - task: AzureCLI@2
+    displayName: Smoke test deployed Azure Function
+    inputs:
+      azureSubscription: '$(AzureSubscription)'
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euxo pipefail
+
+        APP_URL="https://$(FunctionAppName).azurewebsites.net"
+
+        echo "Validating deployed Azure Function at $APP_URL"
+
+        curl -fsS "$APP_URL/api/hello" | tee /tmp/hello-response.json
+
+        grep -q '"service":"hello-api"' /tmp/hello-response.json
